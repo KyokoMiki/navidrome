@@ -17,6 +17,7 @@ import (
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/artwork"
+	"github.com/navidrome/navidrome/core/replaygain"
 	"github.com/navidrome/navidrome/core/storage"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
@@ -26,7 +27,7 @@ import (
 	"github.com/navidrome/navidrome/utils/slice"
 )
 
-func createPhaseFolders(ctx context.Context, state *scanState, ds model.DataStore, cw artwork.CacheWarmer, libs []model.Library) *phaseFolders {
+func createPhaseFolders(ctx context.Context, state *scanState, ds model.DataStore, cw artwork.CacheWarmer, libs []model.Library, rgQueue replaygain.AsyncQueue) *phaseFolders {
 	var jobs []*scanJob
 	var updatedLibs []model.Library
 	for _, lib := range libs {
@@ -61,7 +62,14 @@ func createPhaseFolders(ctx context.Context, state *scanState, ds model.DataStor
 	// Update the state with the libraries that have been processed and have their scan timestamps set
 	state.libraries = updatedLibs
 
-	return &phaseFolders{jobs: jobs, ctx: ctx, ds: ds, state: state}
+	return &phaseFolders{
+		jobs:      jobs,
+		ctx:       ctx,
+		ds:        ds,
+		state:     state,
+		rgService: replaygain.NewService(ds),
+		rgQueue:   rgQueue,
+	}
 }
 
 type scanJob struct {
@@ -123,6 +131,8 @@ type phaseFolders struct {
 	ctx              context.Context
 	state            *scanState
 	prevAlbumPIDConf string
+	rgService        replaygain.Service
+	rgQueue          replaygain.AsyncQueue
 }
 
 func (p *phaseFolders) description() string {
@@ -276,6 +286,27 @@ func (p *phaseFolders) loadTagsFromFiles(entry *folderEntry, toImport map[string
 		for filePath, info := range allInfo {
 			md := metadata.New(filePath, info)
 			track := md.ToMediaFile(entry.job.lib.ID, entry.id)
+			// Set LibraryPath and correct Path for proper AbsolutePath() calculation
+			track.LibraryPath = entry.job.lib.Path
+			track.Path = filePath
+
+			// Preserve ReplayGain data from database if not present in file metadata
+			if prev := toImport[filePath]; prev != nil {
+				// Preserve database ReplayGain values if file metadata doesn't have them
+				if track.RGTrackGain == nil && prev.RGTrackGain != nil {
+					track.RGTrackGain = prev.RGTrackGain
+				}
+				if track.RGTrackPeak == nil && prev.RGTrackPeak != nil {
+					track.RGTrackPeak = prev.RGTrackPeak
+				}
+				if track.RGAlbumGain == nil && prev.RGAlbumGain != nil {
+					track.RGAlbumGain = prev.RGAlbumGain
+				}
+				if track.RGAlbumPeak == nil && prev.RGAlbumPeak != nil {
+					track.RGAlbumPeak = prev.RGAlbumPeak
+				}
+			}
+
 			tracks = append(tracks, track)
 			for _, t := range track.Tags.FlattenAll() {
 				uniqueTags[t.ID] = t
@@ -410,8 +441,43 @@ func (p *phaseFolders) persistChanges(entry *folderEntry) (*folderEntry, error) 
 	}, "scanner: persist changes")
 	if err != nil {
 		log.Error(p.ctx, "Scanner: Error persisting changes to DB", "folder", entry.path, err)
+		return entry, err
 	}
-	return entry, err
+
+	// Enqueue tracks for async ReplayGain processing (outside of transaction)
+	p.enqueueTracksForReplayGain(entry)
+
+	return entry, nil
+}
+
+// enqueueTracksForReplayGain enqueues tracks for async ReplayGain processing
+// This allows tag processing to continue without waiting for R128 calculation
+func (p *phaseFolders) enqueueTracksForReplayGain(entry *folderEntry) {
+	if len(entry.tracks) == 0 || p.rgQueue == nil {
+		return
+	}
+
+	// Check if ReplayGain calculation is enabled
+	if !conf.Server.Scanner.CalculateReplayGain {
+		return
+	}
+
+	// Enqueue tracks for async ReplayGain calculation
+	for i := range entry.tracks {
+		track := &entry.tracks[i]
+
+		// Skip if track already has ReplayGain from file metadata
+		if track.RGTrackGain != nil && track.RGTrackPeak != nil {
+			log.Trace(p.ctx, "Track already has ReplayGain, skipping async queue", "track", track.Path)
+			continue
+		}
+
+		// Create a copy of the track for async processing to avoid race conditions
+		trackCopy := *track
+		p.rgQueue.EnqueueTrack(&trackCopy)
+	}
+
+	log.Debug(p.ctx, "Enqueued tracks for async ReplayGain processing", "folder", entry.path, "tracks", len(entry.tracks))
 }
 
 // persistAlbum persists the given album to the database, and reassigns annotations from the previous album ID

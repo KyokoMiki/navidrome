@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,9 +20,19 @@ type FFmpeg interface {
 	Transcode(ctx context.Context, command, path string, maxBitRate, offset int) (io.ReadCloser, error)
 	ExtractImage(ctx context.Context, path string) (io.ReadCloser, error)
 	Probe(ctx context.Context, files []string) (string, error)
+	AnalyzeR128(ctx context.Context, files []string) (map[string]R128Analysis, error)
+	AnalyzeR128Concat(ctx context.Context, files []string) (R128Analysis, error)
 	CmdPath() (string, error)
 	IsAvailable() bool
 	Version() string
+}
+
+// R128Analysis contains EBU R128 loudness analysis results
+type R128Analysis struct {
+	IntegratedLoudness float64 // LUFS
+	LoudnessRange      float64 // LU
+	TruePeak           float64 // dBTP
+	FilePath           string
 }
 
 func New() FFmpeg {
@@ -31,6 +42,7 @@ func New() FFmpeg {
 const (
 	extractImageCmd = "ffmpeg -i %s -map 0:v -map -0:V -vcodec copy -f image2pipe -"
 	probeCmd        = "ffmpeg %s -f ffmetadata"
+	r128Cmd         = "ffmpeg %s -af ebur128=framelog=verbose:peak=true -f null -"
 )
 
 type ffmpeg struct{}
@@ -79,6 +91,113 @@ func (e *ffmpeg) Probe(ctx context.Context, files []string) (string, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec
 	output, _ := cmd.CombinedOutput()
 	return string(output), nil
+}
+
+func (e *ffmpeg) AnalyzeR128(ctx context.Context, files []string) (map[string]R128Analysis, error) {
+	if _, err := ffmpegCmd(); err != nil {
+		return nil, err
+	}
+
+	results := make(map[string]R128Analysis)
+
+	// Process files individually to get per-file analysis
+	for _, file := range files {
+		if err := fileExists(file); err != nil {
+			log.Warn(ctx, "Skipping R128 analysis for non-existent file", "file", file, err)
+			continue
+		}
+
+		args := createR128Command(r128Cmd, []string{file})
+		log.Trace(ctx, "Executing R128 analysis", "file", file, "args", args)
+
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Warn(ctx, "R128 analysis failed", "file", file, err)
+			continue
+		}
+
+		outputStr := string(output)
+
+		analysis, err := parseR128Output(outputStr, file)
+		if err != nil {
+			log.Warn(ctx, "Failed to parse R128 output", "file", file, err)
+			continue
+		}
+
+		results[file] = analysis
+	}
+
+	return results, nil
+}
+
+func (e *ffmpeg) AnalyzeR128Concat(ctx context.Context, files []string) (R128Analysis, error) {
+	if _, err := ffmpegCmd(); err != nil {
+		return R128Analysis{}, err
+	}
+
+	if len(files) == 0 {
+		return R128Analysis{}, fmt.Errorf("no files provided for analysis")
+	}
+
+	// For a single file, just use the regular analysis
+	if len(files) == 1 {
+		results, err := e.AnalyzeR128(ctx, files)
+		if err != nil {
+			return R128Analysis{}, err
+		}
+		if analysis, ok := results[files[0]]; ok {
+			return analysis, nil
+		}
+		return R128Analysis{}, fmt.Errorf("no analysis result for file %s", files[0])
+	}
+
+	// For multiple files, we need to concatenate them and analyze as one stream
+	// Build FFmpeg command to concatenate files and analyze
+	args := []string{}
+	cmd, _ := ffmpegCmd()
+	args = append(args, cmd)
+
+	// Add standard FFmpeg options
+	args = append(args, "-nostats", "-nostdin", "-hide_banner", "-vn", "-loglevel", "info")
+
+	// Add input files
+	validFiles := 0
+	for _, file := range files {
+		if err := fileExists(file); err != nil {
+			log.Warn(ctx, "Skipping non-existent file in concat analysis", "file", file, err)
+			continue
+		}
+		args = append(args, "-i", file)
+		validFiles++
+	}
+
+	if validFiles == 0 {
+		return R128Analysis{}, fmt.Errorf("no valid files for concat analysis")
+	}
+
+	// Add concat filter and ebur128 analysis
+	filterComplex := fmt.Sprintf("concat=n=%d:v=0:a=1,ebur128=framelog=verbose:peak=none[out]", validFiles)
+	args = append(args, "-filter_complex", filterComplex, "-map", "[out]", "-f", "null", "-")
+
+	log.Trace(ctx, "Executing R128 concat analysis", "files", files, "args", args)
+
+	cmd2 := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec
+	output, err := cmd2.CombinedOutput()
+	if err != nil {
+		return R128Analysis{}, fmt.Errorf("R128 concat analysis failed: %w", err)
+	}
+
+	outputStr := string(output)
+
+	analysis, err := parseR128Output(outputStr, "album_concat")
+	if err != nil {
+		return R128Analysis{}, fmt.Errorf("failed to parse R128 concat output: %w", err)
+	}
+
+	log.Debug(ctx, "R128 concat analysis completed", "fileCount", len(files), "loudness", analysis.IntegratedLoudness)
+
+	return analysis, nil
 }
 
 func (e *ffmpeg) CmdPath() (string, error) {
@@ -189,6 +308,20 @@ func createProbeCommand(cmd string, inputs []string) []string {
 	return args
 }
 
+func createR128Command(cmd string, inputs []string) []string {
+	var args []string
+	for _, s := range fixCmd(cmd) {
+		if s == "%s" {
+			for _, inp := range inputs {
+				args = append(args, "-i", inp)
+			}
+		} else {
+			args = append(args, s)
+		}
+	}
+	return args
+}
+
 func fixCmd(cmd string) []string {
 	split := strings.Fields(cmd)
 	cmdPath, _ := ffmpegCmd()
@@ -218,6 +351,56 @@ func ffmpegCmd() (string, error) {
 		}
 	})
 	return ffmpegPath, ffmpegErr
+}
+
+// parseR128Output parses FFmpeg EBU R128 analysis output
+func parseR128Output(output, filePath string) (R128Analysis, error) {
+	analysis := R128Analysis{FilePath: filePath}
+
+	// Parse integrated loudness: [Parsed_ebur128_0 @ 0x...] I: -23.0 LUFS
+	// Look for the final summary line, not intermediate values
+	integratedRegex := regexp.MustCompile(`I:\s*(-?\d+\.?\d*)\s*LUFS`)
+	matches := integratedRegex.FindAllStringSubmatch(output, -1)
+	if len(matches) > 0 {
+		// Use the last match (final summary)
+		lastMatch := matches[len(matches)-1]
+		if len(lastMatch) > 1 {
+			if val, err := strconv.ParseFloat(lastMatch[1], 64); err == nil {
+				analysis.IntegratedLoudness = val
+			}
+		}
+	}
+
+	// Parse loudness range: [Parsed_ebur128_0 @ 0x...] LRA: 7.3 LU
+	rangeRegex := regexp.MustCompile(`LRA:\s*(-?\d+\.?\d*)\s*LU`)
+	rangeMatches := rangeRegex.FindAllStringSubmatch(output, -1)
+	if len(rangeMatches) > 0 {
+		lastMatch := rangeMatches[len(rangeMatches)-1]
+		if len(lastMatch) > 1 {
+			if val, err := strconv.ParseFloat(lastMatch[1], 64); err == nil {
+				analysis.LoudnessRange = val
+			}
+		}
+	}
+
+	// Parse true peak: [Parsed_ebur128_0 @ 0x...] Peak: -1.2 dBFS
+	peakRegex := regexp.MustCompile(`Peak:\s*(-?\d+\.?\d*)\s*dBFS`)
+	peakMatches := peakRegex.FindAllStringSubmatch(output, -1)
+	if len(peakMatches) > 0 {
+		lastMatch := peakMatches[len(peakMatches)-1]
+		if len(lastMatch) > 1 {
+			if val, err := strconv.ParseFloat(lastMatch[1], 64); err == nil {
+				analysis.TruePeak = val
+			}
+		}
+	}
+
+	// Validate that we got at least the integrated loudness
+	if analysis.IntegratedLoudness == 0 {
+		return analysis, fmt.Errorf("failed to parse integrated loudness from R128 output")
+	}
+
+	return analysis, nil
 }
 
 // These variables are accessible here for tests. Do not use them directly in production code. Use ffmpegCmd() instead.

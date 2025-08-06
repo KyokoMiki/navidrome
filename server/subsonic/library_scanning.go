@@ -19,13 +19,16 @@ func (api *Router) GetScanStatus(r *http.Request) (*responses.Subsonic, error) {
 	}
 	response := newResponse()
 	response.ScanStatus = &responses.ScanStatus{
-		Scanning:    status.Scanning,
-		Count:       int64(status.Count),
-		FolderCount: int64(status.FolderCount),
-		LastScan:    &status.LastScan,
-		Error:       status.LastError,
-		ScanType:    status.ScanType,
-		ElapsedTime: int64(status.ElapsedTime),
+		Scanning:      status.Scanning,
+		Count:         int64(status.Count),
+		FolderCount:   int64(status.FolderCount),
+		LastScan:      &status.LastScan,
+		Error:         status.LastError,
+		ScanType:      status.ScanType,
+		ElapsedTime:   int64(status.ElapsedTime),
+		R128Analyzing: status.R128Analyzing,
+		R128Completed: int64(status.R128Completed),
+		R128Total:     int64(status.R128Total),
 	}
 	return response, nil
 }

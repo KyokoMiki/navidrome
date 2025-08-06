@@ -40,6 +40,10 @@ type StatusInfo struct {
 	LastError   string
 	ScanType    string
 	ElapsedTime time.Duration
+	// R128 analysis progress
+	R128Analyzing bool
+	R128Completed uint32
+	R128Total     uint32
 }
 
 func New(rootCtx context.Context, ds model.DataStore, cw artwork.CacheWarmer, broker events.Broker,
@@ -62,7 +66,12 @@ func (s *controller) getScanner() scanner {
 	if conf.Server.DevExternalScanner {
 		return &scannerExternal{}
 	}
-	return &scannerImpl{ds: s.ds, cw: s.cw, pls: s.pls}
+	return &scannerImpl{
+		ds:      s.ds,
+		cw:      s.cw,
+		pls:     s.pls,
+		rgQueue: nil, // Will be initialized in scanAll if needed
+	}
 }
 
 // CallScan starts an in-process scan of the music library.
@@ -78,7 +87,12 @@ func CallScan(ctx context.Context, ds model.DataStore, pls core.Playlists, fullS
 	progress := make(chan *ProgressInfo, 100)
 	go func() {
 		defer close(progress)
-		scanner := &scannerImpl{ds: ds, cw: artwork.NoopCacheWarmer(), pls: pls}
+		scanner := &scannerImpl{
+			ds:      ds,
+			cw:      artwork.NoopCacheWarmer(),
+			pls:     pls,
+			rgQueue: nil, // Will be initialized in scanAll if needed
+		}
 		scanner.scanAll(ctx, fullScan, progress)
 	}()
 	return progress, nil
@@ -97,6 +111,10 @@ type ProgressInfo struct {
 	Warning         string
 	Error           string
 	ForceUpdate     bool
+	// R128 analysis progress
+	R128Analyzing bool
+	R128Completed int64
+	R128Total     int64
 }
 
 type scanner interface {
@@ -114,6 +132,10 @@ type controller struct {
 	count           atomic.Uint32
 	folderCount     atomic.Uint32
 	changesDetected bool
+	// R128 analysis progress
+	r128Analyzing bool
+	r128Completed atomic.Uint32
+	r128Total     atomic.Uint32
 }
 
 // getLastScanTime returns the most recent scan time across all libraries
@@ -168,13 +190,16 @@ func (s *controller) Status(ctx context.Context) (*StatusInfo, error) {
 
 	if running.Load() {
 		status := &StatusInfo{
-			Scanning:    true,
-			LastScan:    lastScanTime,
-			Count:       s.count.Load(),
-			FolderCount: s.folderCount.Load(),
-			LastError:   lastErr,
-			ScanType:    scanType,
-			ElapsedTime: elapsed,
+			Scanning:      true,
+			LastScan:      lastScanTime,
+			Count:         s.count.Load(),
+			FolderCount:   s.folderCount.Load(),
+			LastError:     lastErr,
+			ScanType:      scanType,
+			ElapsedTime:   elapsed,
+			R128Analyzing: s.r128Analyzing,
+			R128Completed: s.r128Completed.Load(),
+			R128Total:     s.r128Total.Load(),
 		}
 		return status, nil
 	}
@@ -184,13 +209,16 @@ func (s *controller) Status(ctx context.Context) (*StatusInfo, error) {
 		return nil, fmt.Errorf("getting library stats: %w", err)
 	}
 	return &StatusInfo{
-		Scanning:    false,
-		LastScan:    lastScanTime,
-		Count:       uint32(count),
-		FolderCount: uint32(folderCount),
-		LastError:   lastErr,
-		ScanType:    scanType,
-		ElapsedTime: elapsed,
+		Scanning:      false,
+		LastScan:      lastScanTime,
+		Count:         uint32(count),
+		FolderCount:   uint32(folderCount),
+		LastError:     lastErr,
+		ScanType:      scanType,
+		ElapsedTime:   elapsed,
+		R128Analyzing: false,
+		R128Completed: 0,
+		R128Total:     0,
 	}, nil
 }
 
@@ -219,7 +247,14 @@ func (s *controller) ScanAll(requestCtx context.Context, fullScan bool) ([]strin
 	ctx = auth.WithAdminUser(ctx, s.ds)
 
 	// Send the initial scan status event
-	s.sendMessage(ctx, &events.ScanStatus{Scanning: true, Count: 0, FolderCount: 0})
+	s.sendMessage(ctx, &events.ScanStatus{
+		Scanning:      true,
+		Count:         0,
+		FolderCount:   0,
+		R128Analyzing: false,
+		R128Completed: 0,
+		R128Total:     0,
+	})
 	progress := make(chan *ProgressInfo, 100)
 	go func() {
 		defer close(progress)
@@ -245,12 +280,15 @@ func (s *controller) ScanAll(requestCtx context.Context, fullScan bool) ([]strin
 		scanType, elapsed, lastErr := s.getScanInfo(ctx)
 		s.metrics.WriteAfterScanMetrics(ctx, true)
 		s.sendMessage(ctx, &events.ScanStatus{
-			Scanning:    false,
-			Count:       count,
-			FolderCount: folderCount,
-			Error:       lastErr,
-			ScanType:    scanType,
-			ElapsedTime: elapsed,
+			Scanning:      false,
+			Count:         count,
+			FolderCount:   folderCount,
+			Error:         lastErr,
+			ScanType:      scanType,
+			ElapsedTime:   elapsed,
+			R128Analyzing: false,
+			R128Completed: int64(s.r128Completed.Load()),
+			R128Total:     int64(s.r128Total.Load()),
 		})
 	}
 	return scanWarnings, scanError
@@ -274,6 +312,9 @@ func (s *controller) trackProgress(ctx context.Context, progress <-chan *Progres
 	s.count.Store(0)
 	s.folderCount.Store(0)
 	s.changesDetected = false
+	s.r128Analyzing = false
+	s.r128Completed.Store(0)
+	s.r128Total.Store(0)
 
 	var warnings []string
 	var errs []error
@@ -290,6 +331,14 @@ func (s *controller) trackProgress(ctx context.Context, progress <-chan *Progres
 			s.changesDetected = true
 			continue
 		}
+
+		// Handle R128 progress updates
+		if p.R128Total > 0 {
+			s.r128Analyzing = p.R128Analyzing
+			s.r128Completed.Store(uint32(p.R128Completed))
+			s.r128Total.Store(uint32(p.R128Total))
+		}
+
 		s.count.Add(p.FileCount)
 		if p.FileCount > 0 {
 			s.folderCount.Add(1)
@@ -297,12 +346,15 @@ func (s *controller) trackProgress(ctx context.Context, progress <-chan *Progres
 
 		scanType, elapsed, lastErr := s.getScanInfo(ctx)
 		status := &events.ScanStatus{
-			Scanning:    true,
-			Count:       int64(s.count.Load()),
-			FolderCount: int64(s.folderCount.Load()),
-			Error:       lastErr,
-			ScanType:    scanType,
-			ElapsedTime: elapsed,
+			Scanning:      true,
+			Count:         int64(s.count.Load()),
+			FolderCount:   int64(s.folderCount.Load()),
+			Error:         lastErr,
+			ScanType:      scanType,
+			ElapsedTime:   elapsed,
+			R128Analyzing: s.r128Analyzing,
+			R128Completed: int64(s.r128Completed.Load()),
+			R128Total:     int64(s.r128Total.Load()),
 		}
 		if s.limiter != nil && !p.ForceUpdate {
 			s.limiter.Do(func() { s.sendMessage(ctx, status) })

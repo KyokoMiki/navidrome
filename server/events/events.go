@@ -43,6 +43,10 @@ type ScanStatus struct {
 	Error       string        `json:"error"`
 	ScanType    string        `json:"scanType"`
 	ElapsedTime time.Duration `json:"elapsedTime"`
+	// R128 analysis progress
+	R128Analyzing bool  `json:"r128Analyzing"`
+	R128Completed int64 `json:"r128Completed"`
+	R128Total     int64 `json:"r128Total"`
 }
 
 type KeepAlive struct {

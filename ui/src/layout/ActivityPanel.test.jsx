@@ -37,6 +37,9 @@ describe('<ActivityPanel />', () => {
           count: 0,
           error: 'Scan failed',
           elapsedTime: 0,
+          r128Analyzing: false,
+          r128Completed: 0,
+          r128Total: 0,
         },
         serverStart: { version: config.version, startTime: Date.now() },
       },
@@ -57,5 +60,108 @@ describe('<ActivityPanel />', () => {
 
     expect(screen.getByTestId('activity-ok-icon')).toBeInTheDocument()
     expect(screen.getByText('Scan failed')).toBeInTheDocument()
+  })
+
+  it('shows R128 analysis progress when analyzing', () => {
+    const storeWithR128 = createStore(combineReducers({ activity: activityReducer }), {
+      activity: {
+        scanStatus: {
+          scanning: true,
+          folderCount: 5,
+          count: 100,
+          error: '',
+          elapsedTime: 0,
+          r128Analyzing: true,
+          r128Completed: 3,
+          r128Total: 10,
+        },
+        serverStart: { version: config.version, startTime: Date.now() },
+      },
+    })
+
+    render(
+      <Provider store={storeWithR128}>
+        <ActivityPanel />
+      </Provider>,
+    )
+
+    const button = screen.getByRole('button')
+    fireEvent.click(button)
+
+    expect(screen.getByText('正在分析:')).toBeInTheDocument()
+    expect(screen.getByText('3/10')).toBeInTheDocument()
+  })
+
+  it('hides R128 analysis progress when not analyzing', () => {
+    render(
+      <Provider store={store}>
+        <ActivityPanel />
+      </Provider>,
+    )
+
+    const button = screen.getByRole('button')
+    fireEvent.click(button)
+
+    expect(screen.queryByText('正在分析:')).not.toBeInTheDocument()
+  })
+
+  it('shows correct R128 progress at different stages', () => {
+    // Test case: 0/10 (just started)
+    const storeStarted = createStore(combineReducers({ activity: activityReducer }), {
+      activity: {
+        scanStatus: {
+          scanning: true,
+          folderCount: 5,
+          count: 100,
+          error: '',
+          elapsedTime: 0,
+          r128Analyzing: true,
+          r128Completed: 0,
+          r128Total: 10,
+        },
+        serverStart: { version: config.version, startTime: Date.now() },
+      },
+    })
+
+    const { rerender } = render(
+      <Provider store={storeStarted}>
+        <ActivityPanel />
+      </Provider>,
+    )
+
+    let button = screen.getByRole('button')
+    fireEvent.click(button)
+
+    expect(screen.getByText('正在分析:')).toBeInTheDocument()
+    expect(screen.getByText('0/10')).toBeInTheDocument()
+
+    // Test case: 10/10 (completed, should still show until analyzing becomes false)
+    const storeCompleted = createStore(combineReducers({ activity: activityReducer }), {
+      activity: {
+        scanStatus: {
+          scanning: true,
+          folderCount: 5,
+          count: 100,
+          error: '',
+          elapsedTime: 0,
+          r128Analyzing: true,
+          r128Completed: 10,
+          r128Total: 10,
+        },
+        serverStart: { version: config.version, startTime: Date.now() },
+      },
+    })
+
+    rerender(
+      <Provider store={storeCompleted}>
+        <ActivityPanel />
+      </Provider>,
+    )
+
+    button = screen.getByRole('button')
+    fireEvent.click(button)
+
+    expect(screen.getByText('正在分析:')).toBeInTheDocument()
+    expect(screen.getByText('10/10')).toBeInTheDocument()
   })
 })

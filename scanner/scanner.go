@@ -6,11 +6,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Masterminds/squirrel"
 	ppl "github.com/google/go-pipeline/pkg/pipeline"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core"
 	"github.com/navidrome/navidrome/core/artwork"
+	"github.com/navidrome/navidrome/core/replaygain"
 	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
@@ -18,9 +20,10 @@ import (
 )
 
 type scannerImpl struct {
-	ds  model.DataStore
-	cw  artwork.CacheWarmer
-	pls core.Playlists
+	ds      model.DataStore
+	cw      artwork.CacheWarmer
+	pls     core.Playlists
+	rgQueue replaygain.AsyncQueue
 }
 
 // scanState holds the state of an in-progress scan, to be passed to the various phases
@@ -66,6 +69,24 @@ func (s *scannerImpl) scanAll(ctx context.Context, fullScan bool, progress chan<
 	}
 	state.libraries = libs
 
+	// Initialize ReplayGain async queue if enabled
+	if conf.Server.Scanner.CalculateReplayGain {
+		if s.rgQueue == nil {
+			s.rgQueue = replaygain.NewAsyncQueue(s.ds)
+		}
+		// Set progress callback to send updates during R128 analysis
+		s.rgQueue.SetProgressCallback(func(analyzing bool, completed, total int64) {
+			state.sendProgress(&ProgressInfo{
+				R128Analyzing: analyzing,
+				R128Completed: completed,
+				R128Total:     total,
+				ForceUpdate:   true,
+			})
+		})
+		s.rgQueue.Start(ctx)
+		defer s.rgQueue.Stop()
+	}
+
 	log.Info(ctx, "Scanner: Starting scan", "fullScan", state.fullScan, "numLibraries", len(libs))
 
 	// Store scan type and start time
@@ -90,7 +111,7 @@ func (s *scannerImpl) scanAll(ctx context.Context, fullScan bool, progress chan<
 
 	err = run.Sequentially(
 		// Phase 1: Scan all libraries and import new/updated files
-		runPhase[*folderEntry](ctx, 1, createPhaseFolders(ctx, &state, s.ds, s.cw, libs)),
+		runPhase[*folderEntry](ctx, 1, createPhaseFolders(ctx, &state, s.ds, s.cw, libs, s.rgQueue)),
 
 		// Phase 2: Process missing files, checking for moves
 		runPhase[*missingTracks](ctx, 2, createPhaseMissingTracks(ctx, &state, s.ds)),
@@ -105,6 +126,9 @@ func (s *scannerImpl) scanAll(ctx context.Context, fullScan bool, progress chan<
 		),
 
 		// Final Steps (cannot be parallelized):
+
+		// Process album-level ReplayGain for all touched albums
+		s.runAlbumReplayGainProcessing(ctx, &state),
 
 		// Run GC if there were any changes (Remove dangling tracks, empty albums and artists, and orphan annotations)
 		s.runGC(ctx, &state),
@@ -132,6 +156,148 @@ func (s *scannerImpl) scanAll(ctx context.Context, fullScan bool, progress chan<
 	}
 
 	log.Info(ctx, "Scanner: Finished scanning all libraries", "duration", time.Since(startTime))
+}
+
+func (s *scannerImpl) runAlbumReplayGainProcessing(ctx context.Context, state *scanState) func() error {
+	return func() error {
+		// Check if ReplayGain calculation is enabled
+		if !conf.Server.Scanner.CalculateReplayGain || s.rgQueue == nil {
+			return nil
+		}
+
+		if !state.changesDetected.Load() {
+			log.Debug(ctx, "Scanner: No changes detected, skipping album ReplayGain processing")
+			return nil
+		}
+
+		start := time.Now()
+		log.Debug(ctx, "Scanner: Starting album-level ReplayGain processing")
+
+		enqueuedCount := 0
+		errorCount := 0
+
+		// Process each library
+		for _, lib := range state.libraries {
+			if lib.LastScanStartedAt.IsZero() {
+				continue
+			}
+
+			// Get all albums that have been touched in this scan
+			cursor, err := s.ds.Album(ctx).GetTouchedAlbums(lib.ID)
+			if err != nil {
+				log.Error(ctx, "Scanner: Error loading touched albums for ReplayGain processing", "lib", lib.Name, err)
+				continue
+			}
+
+			for album, err := range cursor {
+				if err != nil {
+					log.Error(ctx, "Scanner: Error loading album for ReplayGain processing", err)
+					errorCount++
+					continue
+				}
+
+				// Get all tracks for this album
+				tracks, err := s.ds.MediaFile(ctx).GetAll(model.QueryOptions{
+					Filters: squirrel.Eq{"album_id": album.ID},
+				})
+				if err != nil {
+					log.Error(ctx, "Scanner: Error loading tracks for album ReplayGain", "album", album.Name, err)
+					errorCount++
+					continue
+				}
+
+				if len(tracks) == 0 {
+					continue
+				}
+
+				// Check if album ReplayGain needs processing
+				if needsAlbumReplayGainProcessing(tracks) {
+					// Enqueue album for async processing instead of processing synchronously
+					s.rgQueue.EnqueueAlbum(&album, tracks)
+					enqueuedCount++
+					log.Debug(ctx, "Scanner: Enqueued album for ReplayGain processing", "album", album.Name, "tracks", len(tracks))
+				}
+			}
+		}
+
+		elapsed := time.Since(start)
+		if enqueuedCount > 0 || errorCount > 0 {
+			log.Info(ctx, "Scanner: Enqueued albums for ReplayGain processing",
+				"enqueued", enqueuedCount, "errors", errorCount, "elapsed", elapsed)
+		} else {
+			log.Debug(ctx, "Scanner: No albums needed ReplayGain processing", "elapsed", elapsed)
+		}
+
+		// Log queue statistics and send R128 progress update
+		if s.rgQueue != nil {
+			stats := s.rgQueue.Stats()
+			log.Info(ctx, "Scanner: ReplayGain queue status",
+				"pendingTracks", stats.PendingTracks,
+				"pendingAlbums", stats.PendingAlbums,
+				"processedTracks", stats.ProcessedTracks,
+				"processedAlbums", stats.ProcessedAlbums,
+				"totalTracks", stats.TotalTracks,
+				"totalAlbums", stats.TotalAlbums,
+				"activeWorkers", stats.ActiveWorkers,
+				"errors", stats.Errors)
+
+			// Send R128 analysis progress if there are items in the queue
+			total := stats.TotalTracks + stats.TotalAlbums
+			if total > 0 {
+				state.sendProgress(&ProgressInfo{
+					R128Analyzing: stats.PendingTracks > 0 || stats.PendingAlbums > 0,
+					R128Completed: stats.ProcessedTracks + stats.ProcessedAlbums,
+					R128Total:     total,
+				})
+			}
+		}
+
+		return nil
+	}
+}
+
+// needsAlbumReplayGainProcessing checks if an album needs ReplayGain processing
+func needsAlbumReplayGainProcessing(tracks model.MediaFiles) bool {
+	if len(tracks) == 0 {
+		return false
+	}
+
+	// Check if any track is missing album ReplayGain
+	for _, track := range tracks {
+		if track.RGAlbumGain == nil || track.RGAlbumPeak == nil {
+			return true
+		}
+	}
+
+	// Check if all tracks have consistent album ReplayGain values
+	// This handles the case where tracks were added to an existing album
+	firstAlbumGain := tracks[0].RGAlbumGain
+	firstAlbumPeak := tracks[0].RGAlbumPeak
+
+	if firstAlbumGain == nil || firstAlbumPeak == nil {
+		return true
+	}
+
+	for _, track := range tracks[1:] {
+		if track.RGAlbumGain == nil || track.RGAlbumPeak == nil {
+			return true
+		}
+		// Check for consistency (allow small floating point differences)
+		if abs(*track.RGAlbumGain-*firstAlbumGain) > 0.001 ||
+			abs(*track.RGAlbumPeak-*firstAlbumPeak) > 0.000001 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// abs returns the absolute value of a float64
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func (s *scannerImpl) runGC(ctx context.Context, state *scanState) func() error {

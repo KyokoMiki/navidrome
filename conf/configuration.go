@@ -133,16 +133,18 @@ type configOptions struct {
 }
 
 type scannerOptions struct {
-	Enabled            bool
-	Schedule           string
-	WatcherWait        time.Duration
-	ScanOnStartup      bool
-	Extractor          string
-	ArtistJoiner       string
-	GenreSeparators    string // Deprecated: Use Tags.genre.Split instead
-	GroupAlbumReleases bool   // Deprecated: Use PID.Album instead
-	FollowSymlinks     bool   // Whether to follow symlinks when scanning directories
-	PurgeMissing       string // Values: "never", "always", "full"
+	Enabled              bool
+	Schedule             string
+	WatcherWait          time.Duration
+	ScanOnStartup        bool
+	Extractor            string
+	ArtistJoiner         string
+	GenreSeparators      string // Deprecated: Use Tags.genre.Split instead
+	GroupAlbumReleases   bool   // Deprecated: Use PID.Album instead
+	FollowSymlinks       bool   // Whether to follow symlinks when scanning directories
+	PurgeMissing         string // Values: "never", "always", "full"
+	CalculateReplayGain  bool   // Whether to calculate ReplayGain using FFmpeg EBU R128 if missing
+	ReplayGainMaxWorkers int    // Maximum number of concurrent ReplayGain calculations (default: 2)
 }
 
 type subsonicOptions struct {
@@ -552,6 +554,8 @@ func setViperDefaults() {
 	viper.SetDefault("scanner.groupalbumreleases", false)
 	viper.SetDefault("scanner.followsymlinks", true)
 	viper.SetDefault("scanner.purgemissing", consts.PurgeMissingNever)
+	viper.SetDefault("scanner.calculatereplaygain", false)
+	viper.SetDefault("scanner.replaygainmaxworkers", 2)
 	viper.SetDefault("subsonic.appendsubtitle", true)
 	viper.SetDefault("subsonic.artistparticipations", false)
 	viper.SetDefault("subsonic.defaultreportrealpath", false)
