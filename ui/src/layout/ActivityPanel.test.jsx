@@ -63,21 +63,24 @@ describe('<ActivityPanel />', () => {
   })
 
   it('shows R128 analysis progress when analyzing', () => {
-    const storeWithR128 = createStore(combineReducers({ activity: activityReducer }), {
-      activity: {
-        scanStatus: {
-          scanning: true,
-          folderCount: 5,
-          count: 100,
-          error: '',
-          elapsedTime: 0,
-          r128Analyzing: true,
-          r128Completed: 3,
-          r128Total: 10,
+    const storeWithR128 = createStore(
+      combineReducers({ activity: activityReducer }),
+      {
+        activity: {
+          scanStatus: {
+            scanning: true,
+            folderCount: 5,
+            count: 100,
+            error: '',
+            elapsedTime: 0,
+            r128Analyzing: true,
+            r128Completed: 3,
+            r128Total: 10,
+          },
+          serverStart: { version: config.version, startTime: Date.now() },
         },
-        serverStart: { version: config.version, startTime: Date.now() },
       },
-    })
+    )
 
     render(
       <Provider store={storeWithR128}>
@@ -88,7 +91,7 @@ describe('<ActivityPanel />', () => {
     const button = screen.getByRole('button')
     fireEvent.click(button)
 
-    expect(screen.getByText('正在分析:')).toBeInTheDocument()
+    expect(screen.getByText('Analyzing:')).toBeInTheDocument()
     expect(screen.getByText('3/10')).toBeInTheDocument()
   })
 
@@ -102,26 +105,29 @@ describe('<ActivityPanel />', () => {
     const button = screen.getByRole('button')
     fireEvent.click(button)
 
-    expect(screen.queryByText('正在分析:')).not.toBeInTheDocument()
+    expect(screen.queryByText('Analyzing:')).not.toBeInTheDocument()
   })
 
   it('shows correct R128 progress at different stages', () => {
     // Test case: 0/10 (just started)
-    const storeStarted = createStore(combineReducers({ activity: activityReducer }), {
-      activity: {
-        scanStatus: {
-          scanning: true,
-          folderCount: 5,
-          count: 100,
-          error: '',
-          elapsedTime: 0,
-          r128Analyzing: true,
-          r128Completed: 0,
-          r128Total: 10,
+    const storeStarted = createStore(
+      combineReducers({ activity: activityReducer }),
+      {
+        activity: {
+          scanStatus: {
+            scanning: true,
+            folderCount: 5,
+            count: 100,
+            error: '',
+            elapsedTime: 0,
+            r128Analyzing: true,
+            r128Completed: 0,
+            r128Total: 10,
+          },
+          serverStart: { version: config.version, startTime: Date.now() },
         },
-        serverStart: { version: config.version, startTime: Date.now() },
       },
-    })
+    )
 
     const { rerender } = render(
       <Provider store={storeStarted}>
@@ -132,25 +138,28 @@ describe('<ActivityPanel />', () => {
     let button = screen.getByRole('button')
     fireEvent.click(button)
 
-    expect(screen.getByText('正在分析:')).toBeInTheDocument()
+    expect(screen.getByText('Analyzing:')).toBeInTheDocument()
     expect(screen.getByText('0/10')).toBeInTheDocument()
 
     // Test case: 10/10 (completed, should still show until analyzing becomes false)
-    const storeCompleted = createStore(combineReducers({ activity: activityReducer }), {
-      activity: {
-        scanStatus: {
-          scanning: true,
-          folderCount: 5,
-          count: 100,
-          error: '',
-          elapsedTime: 0,
-          r128Analyzing: true,
-          r128Completed: 10,
-          r128Total: 10,
+    const storeCompleted = createStore(
+      combineReducers({ activity: activityReducer }),
+      {
+        activity: {
+          scanStatus: {
+            scanning: true,
+            folderCount: 5,
+            count: 100,
+            error: '',
+            elapsedTime: 0,
+            r128Analyzing: true,
+            r128Completed: 10,
+            r128Total: 10,
+          },
+          serverStart: { version: config.version, startTime: Date.now() },
         },
-        serverStart: { version: config.version, startTime: Date.now() },
       },
-    })
+    )
 
     rerender(
       <Provider store={storeCompleted}>
@@ -161,7 +170,7 @@ describe('<ActivityPanel />', () => {
     button = screen.getByRole('button')
     fireEvent.click(button)
 
-    expect(screen.getByText('正在分析:')).toBeInTheDocument()
+    expect(screen.getByText('Analyzing:')).toBeInTheDocument()
     expect(screen.getByText('10/10')).toBeInTheDocument()
   })
 })

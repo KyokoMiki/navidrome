@@ -170,7 +170,7 @@ const ActivityPanel = () => {
 
             <Box display="flex" className={classes.counterStatus} mt={2}>
               <Box component="span" flex={2}>
-                正在分析:
+                {translate('activity.analyzing')}:
               </Box>
               <Box component="span" flex={1}>
                 {scanStatus.r128Completed || 0}/{scanStatus.r128Total || 0}

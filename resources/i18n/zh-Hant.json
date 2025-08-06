@@ -444,7 +444,11 @@
         "quickScan": "快速掃描",
         "fullScan": "完全掃描",
         "serverUptime": "伺服器已運作時間",
-        "serverDown": "伺服器離線"
+        "serverDown": "伺服器離線",
+        "scanType": "掃描類型",
+        "status": "掃描狀態",
+        "elapsedTime": "用時",
+        "analyzing": "正在分析"
     },
     "help": {
         "title": "Navidrome 快捷鍵",

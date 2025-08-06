@@ -606,7 +606,8 @@
     "serverDown": "OFFLINE",
     "scanType": "Type",
     "status": "Scan Error",
-    "elapsedTime": "Elapsed Time"
+    "elapsedTime": "Elapsed Time",
+    "analyzing": "Analyzing"
   },
   "nowPlaying": {
     "title": "Now Playing",
