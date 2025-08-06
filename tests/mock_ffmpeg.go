@@ -6,8 +6,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	"github.com/navidrome/navidrome/core/ffmpeg"
 )
 
 func NewMockFFmpeg(data string) *MockFFmpeg {
@@ -46,19 +44,28 @@ func (ff *MockFFmpeg) Probe(context.Context, []string) (string, error) {
 	return "", nil
 }
 
-func (ff *MockFFmpeg) AnalyzeR128(context.Context, []string) (map[string]ffmpeg.R128Analysis, error) {
+// R128Analysis contains EBU R128 loudness analysis results (duplicated to avoid import cycle)
+type R128Analysis struct {
+	IntegratedLoudness float64 // LUFS
+	LoudnessRange      float64 // LU
+	TruePeak           float64 // dBTP
+	FilePath           string
+}
+
+func (ff *MockFFmpeg) AnalyzeR128(context.Context, []string) (map[string]R128Analysis, error) {
 	if ff.Error != nil {
 		return nil, ff.Error
 	}
-	return make(map[string]ffmpeg.R128Analysis), nil
+	return make(map[string]R128Analysis), nil
 }
 
-func (ff *MockFFmpeg) AnalyzeR128Concat(context.Context, []string) (ffmpeg.R128Analysis, error) {
+func (ff *MockFFmpeg) AnalyzeR128Concat(context.Context, []string) (R128Analysis, error) {
 	if ff.Error != nil {
-		return ffmpeg.R128Analysis{}, ff.Error
+		return R128Analysis{}, ff.Error
 	}
-	return ffmpeg.R128Analysis{}, nil
+	return R128Analysis{}, nil
 }
+
 func (ff *MockFFmpeg) CmdPath() (string, error) {
 	if ff.Error != nil {
 		return "", ff.Error

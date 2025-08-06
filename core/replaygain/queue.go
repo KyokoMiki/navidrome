@@ -126,20 +126,16 @@ func (q *asyncQueue) EnqueueTrack(track *model.MediaFile) {
 		Retry: 0,
 	}
 
-	// Update stats immediately for testing purposes
-	q.stats.pendingTracks.Add(1)
-	q.stats.totalTracks.Add(1)
-
 	// Use goroutine to avoid blocking on unbuffered channel
 	go func() {
 		select {
 		case q.trackQueue <- job:
+			q.stats.pendingTracks.Add(1)
+			q.stats.totalTracks.Add(1)
 			log.Trace(q.ctx, "Track enqueued for ReplayGain calculation", "track", track.Path)
 			q.notifyProgress()
 		case <-q.ctx.Done():
-			// Queue is shutting down, revert stats
-			q.stats.pendingTracks.Add(-1)
-			q.stats.totalTracks.Add(-1)
+			// Queue is shutting down
 			return
 		}
 	}()
@@ -163,20 +159,16 @@ func (q *asyncQueue) EnqueueAlbum(album *model.Album, tracks model.MediaFiles) {
 		Retry:  0,
 	}
 
-	// Update stats immediately for testing purposes
-	q.stats.pendingAlbums.Add(1)
-	q.stats.totalAlbums.Add(1)
-
 	// Use goroutine to avoid blocking on unbuffered channel
 	go func() {
 		select {
 		case q.albumQueue <- job:
+			q.stats.pendingAlbums.Add(1)
+			q.stats.totalAlbums.Add(1)
 			log.Trace(q.ctx, "Album enqueued for ReplayGain calculation", "album", album.Name, "tracks", len(tracks))
 			q.notifyProgress()
 		case <-q.ctx.Done():
-			// Queue is shutting down, revert stats
-			q.stats.pendingAlbums.Add(-1)
-			q.stats.totalAlbums.Add(-1)
+			// Queue is shutting down
 			return
 		}
 	}()
